@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>リアルタイムチャット</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header>
+        <input id="display-name" class="name-input" type="text" maxlength="24" aria-label="ユーザー名" title="ユーザー名を変更">
+        <span id="lock-indicator" hidden>ロック中</span>
+        <div class="header-right">
+          <select id="color">
+            <option value="red">赤</option>
+            <option value="blue">青</option>
+            <option value="yellow">黄</option>
+            <option value="green">緑</option>
+            <option value="white" selected>白</option>
+          </select>
+          <span id="status" class="connecting" role="status">接続中</span>
+        </div>
+      </header>
+      <div id="lock-screen" tabindex="-1" hidden>
+        <img src="/lock-screen.svg" alt="STOP! 管理者のロック解除をお待ちください。">
+      </div>
+      <section id="chat">
+        <div id="screens" aria-label="画面共有"></div>
+        <div id="messages" aria-live="polite"></div>
+        <div id="reply-preview" hidden></div>
+        <form id="message-form">
+          <div class="composer">
+            <textarea id="text" maxlength="4000" placeholder="メッセージを入力"></textarea>
+            <div class="actions">
+              <label class="icon-button" title="画像・動画を添付" aria-label="画像・動画を添付">
+                <input id="file" type="file" accept="image/*,video/*">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-7-7h14" /></svg>
+              </label>
+              <button id="share" class="icon-button" type="button" title="画面共有" aria-label="画面共有">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8m-4-4v4" /></svg>
+              </button>
+              <button class="send-button" type="submit" title="送信" aria-label="送信">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></svg>
+              </button>
+            </div>
+          </div>
+          <div id="file-name"></div>
+        </form>
+      </section>
+    </main>
+    <script src="/client.js"></script>
+  </body>
+</html>
