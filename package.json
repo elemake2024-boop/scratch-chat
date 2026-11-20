@@ -6,6 +6,7 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "node-appwrite": "^32.0.0",
     "ws": "^8.18.0"
   }
 }

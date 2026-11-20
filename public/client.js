@@ -19,6 +19,10 @@ let socket;
 let reconnectTimer;
 let reconnectDelay = 1000;
 let resumeToken = sessionStorage.getItem("chat-resume-token");
+let appwriteConfig;
+let appwriteSessionPromise;
+let appwriteUserId;
+let pendingUploadedFileId;
 let currentName = anonymousName;
 let joiningName = anonymousName;
 let replyToId = null;
@@ -98,6 +102,7 @@ async function handleSocketMessage({ data }) {
   } else if (packet.type === "welcome") {
     myId = packet.id;
     isAdmin = packet.isAdmin === true;
+    appwriteConfig = packet.appwrite;
     resumeToken = packet.resumeToken;
     sessionStorage.setItem("chat-resume-token", resumeToken);
     joined = true;
@@ -125,6 +130,9 @@ async function handleSocketMessage({ data }) {
       displayName.value = packet.name;
     }
   } else if (packet.type === "message") {
+    if (packet.message.authorId === myId && packet.message.attachment?.fileId === pendingUploadedFileId) {
+      pendingUploadedFileId = null;
+    }
     renderMessage(packet.message);
   } else if (packet.type === "delete") {
     document.querySelector(`[data-message-id="${CSS.escape(packet.id)}"]`)?.remove();
@@ -146,6 +154,11 @@ async function handleSocketMessage({ data }) {
       status.textContent = "画面共有の接続に失敗しました";
     }
   } else if (packet.type === "error") {
+    if (pendingUploadedFileId) {
+      const fileId = pendingUploadedFileId;
+      pendingUploadedFileId = null;
+      void discardUploadedFile(fileId);
+    }
     status.textContent = packet.message;
   }
 }
@@ -220,11 +233,12 @@ function renderMessage(message) {
   if (message.attachment) {
     const media = document.createElement(message.attachment.mime.startsWith("video/") ? "video" : "img");
     media.className = "attachment";
-    media.src = message.attachment.data;
+    media.src = message.attachment.url;
     media.alt = message.attachment.name;
     if (media instanceof HTMLVideoElement) {
       media.controls = true;
       media.playsInline = true;
+      media.preload = "metadata";
     }
     bubble.append(media);
   }
@@ -288,6 +302,255 @@ fileInput.addEventListener("change", () => {
   fileName.textContent = fileInput.files[0]?.name || "";
 });
 
+const maxUploadSize = 330 * 1024 * 1024;
+const uploadChunkSize = 5 * 1024 * 1024;
+
+async function appwriteJson(path, options = {}) {
+  const response = await fetch(`${appwriteConfig.endpoint}${path}`, {
+    ...options,
+    credentials: "include",
+    headers: {
+      "X-Appwrite-Project": appwriteConfig.projectId,
+      ...(options.headers || {}),
+    },
+  });
+  if (!response.ok) {
+    let detail = `Appwrite request failed (${response.status})`;
+    try {
+      const error = await response.json();
+      detail = error.message || detail;
+    } catch {}
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
+async function ensureAppwriteSession() {
+  if (!appwriteSessionPromise) {
+    appwriteSessionPromise = (async () => {
+      if (!appwriteConfig) throw new Error("Appwriteの接続設定を取得できませんでした。");
+      let session;
+      try {
+        session = await appwriteJson("/account/sessions/current");
+      } catch (error) {
+        if (error.status !== 401) throw error;
+        session = await appwriteJson("/account/sessions/anonymous", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+      }
+      appwriteUserId = session.userId;
+    })().catch((error) => {
+      appwriteSessionPromise = null;
+      throw error;
+    });
+  }
+  await appwriteSessionPromise;
+}
+
+async function getAppwriteJwt() {
+  await ensureAppwriteSession();
+  const result = await appwriteJson("/account/jwt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return result.jwt;
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("画像を圧縮できませんでした。"));
+    }, type, quality);
+  });
+}
+
+async function compressImage(file) {
+  if (["image/gif", "image/svg+xml", "image/apng"].includes(file.type)) return file;
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, 1920 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("画像圧縮用Canvasを作成できませんでした。");
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await canvasToBlob(canvas, "image/webp", 0.82);
+    const baseName = file.name.replace(/\.[^.]+$/, "");
+    const extension = blob.type === "image/webp" ? "webp" : "png";
+    return new File([blob], `${baseName}.${extension}`, { type: blob.type });
+  } finally {
+    bitmap.close();
+  }
+}
+
+async function compressVideo(file) {
+  if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream || !window.AudioContext) {
+    throw new Error("このブラウザーは動画圧縮に対応していません。");
+  }
+  const sourceUrl = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.preload = "auto";
+  video.src = sourceUrl;
+  let audioContext;
+  let stream;
+  try {
+    await new Promise((resolve, reject) => {
+      video.addEventListener("loadedmetadata", resolve, { once: true });
+      video.addEventListener("error", () => reject(new Error("動画を読み込めませんでした。")), { once: true });
+    });
+    const scale = Math.min(1, 1280 / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("動画圧縮用Canvasを作成できませんでした。");
+
+    audioContext = new AudioContext();
+    const destination = audioContext.createMediaStreamDestination();
+    const source = audioContext.createMediaElementSource(video);
+    source.connect(destination);
+    await audioContext.resume();
+    stream = canvas.captureStream(30);
+    destination.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
+
+    const mimeType = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm",
+      "video/mp4",
+    ].find((type) => MediaRecorder.isTypeSupported(type));
+    if (!mimeType) {
+      throw new Error("このブラウザーの動画形式には対応していません。");
+    }
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: 1_250_000,
+      audioBitsPerSecond: 128_000,
+    });
+    const chunks = [];
+    const result = new Promise((resolve, reject) => {
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size) chunks.push(event.data);
+      });
+      recorder.addEventListener("error", () => reject(new Error("動画の圧縮に失敗しました。")), { once: true });
+      recorder.addEventListener("stop", () => {
+        if (!chunks.length) {
+          reject(new Error("圧縮後の動画を作成できませんでした。"));
+          return;
+        }
+        resolve(new Blob(chunks, { type: recorder.mimeType || mimeType }));
+      }, { once: true });
+    });
+    result.catch(() => {});
+
+    let frame;
+    const drawFrame = () => {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (!video.ended && recorder.state === "recording") frame = requestAnimationFrame(drawFrame);
+    };
+    const ended = new Promise((resolve, reject) => {
+      video.addEventListener("ended", resolve, { once: true });
+      video.addEventListener("error", () => reject(new Error("動画の再生中にエラーが発生しました。")), { once: true });
+    });
+    recorder.start(1000);
+    try {
+      await video.play();
+      drawFrame();
+      await ended;
+    } finally {
+      cancelAnimationFrame(frame);
+      if (recorder.state === "recording") recorder.stop();
+    }
+    const blob = await result;
+    if (blob.size > maxUploadSize) throw new Error("圧縮後の動画が330MBを超えています。");
+    const extension = blob.type.includes("mp4") ? "mp4" : "webm";
+    const baseName = file.name.replace(/\.[^.]+$/, "");
+    return new File([blob], `${baseName}.${extension}`, { type: blob.type });
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+    stream?.getTracks().forEach((track) => track.stop());
+    if (audioContext && audioContext.state !== "closed") await audioContext.close();
+  }
+}
+
+async function uploadToAppwrite(file) {
+  await ensureAppwriteSession();
+  const fileId = crypto.randomUUID().replaceAll("-", "");
+  const totalChunks = Math.ceil(file.size / uploadChunkSize);
+  let uploadId;
+  try {
+    for (let index = 0; index < totalChunks; index += 1) {
+      const start = index * uploadChunkSize;
+      const end = Math.min(start + uploadChunkSize, file.size);
+      const form = new FormData();
+      form.append("fileId", fileId);
+      form.append("permissions[]", 'read("any")');
+      form.append("permissions[]", `delete("user:${appwriteUserId}")`);
+      form.append("file", file.slice(start, end, file.type), file.name);
+      const headers = { "X-Appwrite-JWT": await getAppwriteJwt() };
+      if (totalChunks > 1) {
+        headers["Content-Range"] = `bytes ${start}-${end - 1}/${file.size}`;
+        if (uploadId) headers["X-Appwrite-ID"] = uploadId;
+      }
+      const response = await fetch(
+        `${appwriteConfig.endpoint}/storage/buckets/${encodeURIComponent(appwriteConfig.bucketId)}/files`,
+        {
+          method: "POST",
+          headers: {
+            "X-Appwrite-Project": appwriteConfig.projectId,
+            ...headers,
+          },
+          credentials: "include",
+          body: form,
+        },
+      );
+      if (!response.ok) {
+        let detail = `Appwriteへのアップロードに失敗しました (${response.status})`;
+        try {
+          const error = await response.json();
+          detail = error.message || detail;
+        } catch {}
+        throw new Error(detail);
+      }
+      const result = await response.json();
+      uploadId = result.$id || uploadId;
+      status.textContent = `アップロード中 ${Math.round((end / file.size) * 100)}%`;
+    }
+  } catch (error) {
+    await discardUploadedFile(uploadId || fileId);
+    throw error;
+  }
+  return { fileId: uploadId || fileId, fileName: file.name, fileMime: file.type };
+}
+
+async function discardUploadedFile(fileId) {
+  try {
+    const response = await fetch(
+      `${appwriteConfig.endpoint}/storage/buckets/${encodeURIComponent(appwriteConfig.bucketId)}/files/${encodeURIComponent(fileId)}`,
+      {
+        method: "DELETE",
+        headers: {
+          "X-Appwrite-Project": appwriteConfig.projectId,
+          "X-Appwrite-JWT": await getAppwriteJwt(),
+        },
+        credentials: "include",
+      },
+    );
+    if (!response.ok && response.status !== 404) {
+      console.error(`Could not remove unattached Appwrite file (${response.status}).`);
+    }
+  } catch (error) {
+    console.error("Could not remove unattached Appwrite file:", error);
+  }
+}
+
 document.querySelector("#message-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const file = fileInput.files[0];
@@ -297,30 +560,31 @@ document.querySelector("#message-form").addEventListener("submit", async (event)
     alert("画像または動画を選択してください。");
     return;
   }
-  if (file && file.size > 8 * 1024 * 1024) {
-    alert("画像・動画は8MB以下にしてください。");
+  if (file && file.size > maxUploadSize) {
+    alert("画像・動画は330MB以下にしてください。");
     return;
   }
 
-  let attachment;
+  let uploadedFile;
   try {
     if (file) {
-      attachment = {
-        data: await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error("ファイルを読み込めませんでした。"));
-          reader.readAsDataURL(file);
-        }),
-        name: file.name,
-        mime: file.type,
-      };
+      status.textContent = file.type.startsWith("video/") ? "動画を720pに圧縮中..." : "画像を圧縮中...";
+      const preparedFile = file.type.startsWith("video/")
+        ? await compressVideo(file)
+        : await compressImage(file);
+      if (preparedFile.size > maxUploadSize) {
+        throw new Error("圧縮後のファイルが330MBを超えています。");
+      }
+      uploadedFile = await uploadToAppwrite(preparedFile);
     }
   } catch (error) {
     status.textContent = error.message;
     return;
   }
-  if (!send({ type: "message", text, attachment, replyTo: replyToId })) {
+  if (uploadedFile) pendingUploadedFileId = uploadedFile.fileId;
+  if (!send({ type: "message", text, ...uploadedFile, replyTo: replyToId })) {
+    if (uploadedFile) await discardUploadedFile(uploadedFile.fileId);
+    pendingUploadedFileId = null;
     status.textContent = "接続が切れているため送信できません";
     return;
   }
@@ -328,6 +592,7 @@ document.querySelector("#message-form").addEventListener("submit", async (event)
   fileInput.value = "";
   fileName.textContent = "";
   clearReply();
+  status.textContent = "接続済み";
 });
 
 shareButton.addEventListener("click", async () => {

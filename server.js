@@ -2,14 +2,41 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const { Client, ID, Query, Storage, TablesDB } = require("node-appwrite");
 const { WebSocketServer, WebSocket } = require("ws");
+
+const requiredEnv = [
+  "APPWRITE_ENDPOINT",
+  "APPWRITE_PROJECT_ID",
+  "APPWRITE_DATABASE_ID",
+  "APPWRITE_TABLE_ID",
+  "APPWRITE_BUCKET_ID",
+  "APPWRITE_API_KEY",
+];
+const missingEnv = requiredEnv.filter((key) => !process.env[key]);
+if (missingEnv.length) throw new Error(`Missing required environment variables: ${missingEnv.join(", ")}`);
+
+const appwriteConfig = {
+  endpoint: process.env.APPWRITE_ENDPOINT.replace(/\/+$/, ""),
+  projectId: process.env.APPWRITE_PROJECT_ID,
+  databaseId: process.env.APPWRITE_DATABASE_ID,
+  tableId: process.env.APPWRITE_TABLE_ID,
+  bucketId: process.env.APPWRITE_BUCKET_ID,
+};
+const appwriteClient = new Client()
+  .setEndpoint(appwriteConfig.endpoint)
+  .setProject(appwriteConfig.projectId)
+  .setKey(process.env.APPWRITE_API_KEY);
+const tables = new TablesDB(appwriteClient);
+const storage = new Storage(appwriteClient);
 
 const publicDir = path.join(__dirname, "public");
 const colors = new Set(["red", "blue", "yellow", "green", "white"]);
 const clients = new Map();
 const sessions = new Map();
-const messages = [];
 let lockOwnerId = null;
+const retentionMs = 72 * 60 * 60 * 1000;
+const pageSize = 100;
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -20,6 +47,10 @@ const mimeTypes = {
 
 const server = http.createServer((request, response) => {
   const pathname = new URL(request.url, "http://localhost").pathname;
+  if (request.method === "GET" && pathname === "/ping") {
+    response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }).end("OK");
+    return;
+  }
   const file = pathname === "/" ? "index.html" : path.basename(pathname);
   const filePath = path.join(publicDir, file);
 
@@ -54,178 +85,371 @@ function broadcast(data, except) {
   }
 }
 
+function sendError(socket, message) {
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "error", message }));
+  }
+}
+
+function rowToMessage(row) {
+  let replyTo = null;
+  if (row.replyTo) {
+    try {
+      replyTo = JSON.parse(row.replyTo);
+    } catch (error) {
+      console.error(`Invalid replyTo JSON in message ${row.$id}:`, error);
+    }
+  }
+  const message = {
+    id: row.$id,
+    authorId: row.senderId,
+    name: row.name,
+    color: row.color,
+    text: row.text || "",
+    replyTo,
+  };
+  if (row.fileId) {
+    message.attachment = {
+      fileId: row.fileId,
+      name: row.fileName,
+      mime: row.fileMime,
+      url: `${appwriteConfig.endpoint}/storage/buckets/${encodeURIComponent(appwriteConfig.bucketId)}/files/${encodeURIComponent(row.fileId)}/view?project=${encodeURIComponent(appwriteConfig.projectId)}`,
+    };
+  }
+  return message;
+}
+
+async function listRows(queries = []) {
+  const rows = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const result = await tables.listRows({
+      databaseId: appwriteConfig.databaseId,
+      tableId: appwriteConfig.tableId,
+      queries: [...queries, Query.limit(pageSize), Query.offset(offset)],
+      total: false,
+    });
+    rows.push(...result.rows);
+    if (result.rows.length < pageSize) return rows;
+  }
+}
+
+async function getRecentMessages() {
+  const cutoff = new Date(Date.now() - retentionMs).toISOString();
+  const rows = await listRows([
+    Query.greaterThanEqual("$createdAt", cutoff),
+    Query.orderAsc("$createdAt"),
+  ]);
+  return rows.map(rowToMessage);
+}
+
+function isNotFound(error) {
+  return error && (error.code === 404 || error.status === 404);
+}
+
+async function deleteFileIfPresent(fileId) {
+  if (!fileId) return;
+  try {
+    await storage.deleteFile({ bucketId: appwriteConfig.bucketId, fileId });
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+}
+
+let cleanupRunning = false;
+async function deleteExpiredMessages() {
+  if (cleanupRunning) return;
+  cleanupRunning = true;
+  try {
+    const cutoff = new Date(Date.now() - retentionMs).toISOString();
+    while (true) {
+      const result = await tables.listRows({
+        databaseId: appwriteConfig.databaseId,
+        tableId: appwriteConfig.tableId,
+        queries: [
+          Query.lessThanEqual("$createdAt", cutoff),
+          Query.orderAsc("$createdAt"),
+          Query.limit(1),
+        ],
+        total: false,
+      });
+      const row = result.rows[0];
+      if (!row) break;
+      await deleteFileIfPresent(row.fileId);
+      await tables.deleteRow({
+        databaseId: appwriteConfig.databaseId,
+        tableId: appwriteConfig.tableId,
+        rowId: row.$id,
+      });
+    }
+  } catch (error) {
+    console.error("Expired-message cleanup failed:", error);
+  } finally {
+    cleanupRunning = false;
+  }
+}
+
+async function keepAppwriteAlive() {
+  try {
+    await tables.listRows({
+      databaseId: appwriteConfig.databaseId,
+      tableId: appwriteConfig.tableId,
+      queries: [Query.limit(1)],
+      total: false,
+    });
+  } catch (error) {
+    console.error("Appwrite keep-alive read failed:", error);
+  }
+}
+
+function updateRow(rowId, data) {
+  return tables.updateRow({
+    databaseId: appwriteConfig.databaseId,
+    tableId: appwriteConfig.tableId,
+    rowId,
+    data,
+  });
+}
+
+async function renameMessages(authorId, name) {
+  const rows = await listRows();
+  const senderById = new Map(rows.map((row) => [row.$id, row.senderId]));
+  for (const row of rows) {
+    let update;
+    if (row.senderId === authorId) update = { name };
+    if (row.replyTo) {
+      try {
+        const replyTo = JSON.parse(row.replyTo);
+        if (senderById.get(replyTo.id) === authorId && replyTo.name !== name) {
+          update = { ...update, replyTo: JSON.stringify({ ...replyTo, name }) };
+        }
+      } catch (error) {
+        console.error(`Invalid replyTo JSON in message ${row.$id}:`, error);
+      }
+    }
+    if (update) await updateRow(row.$id, update);
+  }
+}
+
+async function recolorMessages(authorId, color) {
+  const rows = await listRows([Query.equal("senderId", authorId)]);
+  for (const row of rows) await updateRow(row.$id, { color });
+}
+
+async function createMessage(data, client) {
+  const text = typeof data.text === "string" ? data.text.trim().slice(0, 4000) : "";
+  let fileId = "";
+  let fileName = "";
+  let fileMime = "";
+  if (data.fileId !== undefined || data.fileName !== undefined || data.fileMime !== undefined) {
+    if (typeof data.fileId !== "string" || !data.fileId ||
+        typeof data.fileName !== "string" || typeof data.fileMime !== "string" ||
+        !/^(image|video)\/[a-zA-Z0-9.+-]+$/.test(data.fileMime)) {
+      throw new Error("画像・動画のアップロード情報が無効です。");
+    }
+    const file = await storage.getFile({ bucketId: appwriteConfig.bucketId, fileId: data.fileId });
+    if (!/^(image|video)\//.test(file.mimeType) || file.sizeOriginal > 330 * 1024 * 1024) {
+      throw new Error("画像・動画は対応形式の330MB以下にしてください。");
+    }
+    fileId = file.$id;
+    fileName = file.name.slice(0, 255);
+    fileMime = file.mimeType;
+  }
+  if (!text && !fileId) throw new Error("メッセージか画像・動画を入力してください。");
+
+  let replyTo;
+  if (typeof data.replyTo === "string") {
+    try {
+      const row = await tables.getRow({
+        databaseId: appwriteConfig.databaseId,
+        tableId: appwriteConfig.tableId,
+        rowId: data.replyTo,
+      });
+      if (Date.now() - new Date(row.$createdAt).getTime() < retentionMs) replyTo = rowToMessage(row);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+  }
+  const replySnapshot = replyTo ? {
+    id: replyTo.id,
+    authorId: replyTo.authorId,
+    name: replyTo.name,
+    text: replyTo.text || replyTo.attachment?.name || "",
+  } : null;
+  const row = await tables.createRow({
+    databaseId: appwriteConfig.databaseId,
+    tableId: appwriteConfig.tableId,
+    rowId: ID.unique(),
+    data: {
+      senderId: client.id,
+      name: client.name,
+      color: client.color,
+      text,
+      replyTo: replySnapshot ? JSON.stringify(replySnapshot) : "",
+      fileId,
+      fileName,
+      fileMime,
+    },
+  });
+  return rowToMessage(row);
+}
+
+async function deleteMessage(messageId, client) {
+  let row;
+  try {
+    row = await tables.getRow({
+      databaseId: appwriteConfig.databaseId,
+      tableId: appwriteConfig.tableId,
+      rowId: messageId,
+    });
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    throw error;
+  }
+  if (row.senderId !== client.id && !client.isAdmin) return false;
+  await deleteFileIfPresent(row.fileId);
+  await tables.deleteRow({
+    databaseId: appwriteConfig.databaseId,
+    tableId: appwriteConfig.tableId,
+    rowId: messageId,
+  });
+  return true;
+}
+
 wss.on("connection", (socket) => {
   const client = { id: randomUUID(), name: "ゲスト", color: "white", isAdmin: false, joined: false };
   clients.set(socket, client);
 
+  let messageQueue = Promise.resolve();
   socket.on("message", (raw) => {
+    messageQueue = messageQueue.then(() => processMessage(raw)).catch((error) => {
+      console.error("WebSocket request failed:", error);
+      sendError(socket, "処理に失敗しました。");
+    });
+  });
+
+  async function processMessage(raw) {
     let data;
     try {
       data = JSON.parse(raw.toString());
     } catch {
-      socket.send(JSON.stringify({ type: "error", message: "不正なメッセージです。" }));
+      sendError(socket, "不正なメッセージです。");
       return;
     }
     if (!data || typeof data !== "object") {
-      socket.send(JSON.stringify({ type: "error", message: "不正なメッセージです。" }));
+      sendError(socket, "不正なメッセージです。");
       return;
     }
 
-    if (data.type === "join") {
-      if (client.joined) return;
-      const session = typeof data.resumeToken === "string" ? sessions.get(data.resumeToken) : null;
-      if (session) {
-        client.id = session.id;
-        client.isAdmin = session.isAdmin === true;
-        client.resumeToken = data.resumeToken;
-      } else {
-        client.id = randomUUID();
-        client.isAdmin = false;
-        client.resumeToken = randomUUID();
-        sessions.set(client.resumeToken, { id: client.id, isAdmin: false });
-      }
-      client.name = typeof data.name === "string" ? data.name.trim().slice(0, 24) || "ゲスト" : "ゲスト";
-      client.color = colors.has(data.color) ? data.color : "white";
-      client.joined = true;
-      socket.send(JSON.stringify({
-        type: "welcome",
-        id: client.id,
-        resumeToken: client.resumeToken,
-        isAdmin: client.isAdmin,
-        messages,
-        lockedBy: lockOwnerId,
-        peers: [...clients.values()].filter((peer) => peer.joined && peer !== client).map(({ id }) => id),
-      }));
-      broadcast({ type: "peer-joined", id: client.id }, socket);
-      return;
-    }
-
-    if (!client.joined) {
-      socket.send(JSON.stringify({ type: "error", message: "先にチャットへ参加してください。" }));
-      return;
-    }
-
-    if (data.type === "lock-toggle") {
-      lockOwnerId = lockOwnerId === null ? client.id : null;
-      broadcast({ type: "lock", lockedBy: lockOwnerId });
-      return;
-    }
-
-    if (data.type === "admin-enable") {
-      if (data.code !== "888") {
-        socket.send(JSON.stringify({ type: "error", message: "管理者コマンドが無効です。" }));
-        return;
-      }
-      const session = sessions.get(client.resumeToken);
-      if (!session) {
-        socket.send(JSON.stringify({ type: "error", message: "管理者セッションがありません。" }));
-        return;
-      }
-      client.isAdmin = true;
-      session.isAdmin = true;
-      socket.send(JSON.stringify({ type: "admin-enabled" }));
-      return;
-    }
-
-    if (data.type === "color") {
-      if (!colors.has(data.color)) {
-        socket.send(JSON.stringify({ type: "error", message: "色を選択してください。" }));
-        return;
-      }
-      client.color = data.color;
-      messages
-        .filter((message) => message.authorId === client.id)
-        .forEach((message) => { message.color = client.color; });
-      broadcast({ type: "color", authorId: client.id, color: client.color });
-      return;
-    }
-
-    if (data.type === "rename") {
-      const name = typeof data.name === "string" ? data.name.trim().slice(0, 24) : "";
-      if (!name) {
-        socket.send(JSON.stringify({ type: "error", message: "ユーザー名を入力してください。" }));
-        return;
-      }
-      client.name = name;
-      const ownMessageIds = new Set();
-      messages.forEach((message) => {
-        if (message.authorId === client.id) {
-          message.name = name;
-          ownMessageIds.add(message.id);
+    try {
+      if (data.type === "join") {
+        if (client.joined) return;
+        const session = typeof data.resumeToken === "string" ? sessions.get(data.resumeToken) : null;
+        if (session) {
+          client.id = session.id;
+          client.isAdmin = session.isAdmin === true;
+          client.resumeToken = data.resumeToken;
+        } else {
+          client.id = randomUUID();
+          client.isAdmin = false;
+          client.resumeToken = randomUUID();
+          sessions.set(client.resumeToken, { id: client.id, isAdmin: false });
         }
-      });
-      messages.forEach((message) => {
-        if (message.replyTo && ownMessageIds.has(message.replyTo.id)) message.replyTo.name = name;
-      });
-      broadcast({ type: "name", authorId: client.id, name });
-      return;
-    }
+        client.name = typeof data.name === "string" ? data.name.trim().slice(0, 24) || "ゲスト" : "ゲスト";
+        client.color = colors.has(data.color) ? data.color : "white";
+        const messages = await getRecentMessages();
+        client.joined = true;
+        socket.send(JSON.stringify({
+          type: "welcome",
+          id: client.id,
+          resumeToken: client.resumeToken,
+          isAdmin: client.isAdmin,
+          messages,
+          lockedBy: lockOwnerId,
+          peers: [...clients.values()].filter((peer) => peer.joined && peer !== client).map(({ id }) => id),
+          appwrite: {
+            endpoint: appwriteConfig.endpoint,
+            projectId: appwriteConfig.projectId,
+            bucketId: appwriteConfig.bucketId,
+          },
+        }));
+        broadcast({ type: "peer-joined", id: client.id }, socket);
+        return;
+      }
 
-    if (data.type === "message") {
-      const text = typeof data.text === "string" ? data.text.trim().slice(0, 4000) : "";
-      let attachment;
-      if (data.attachment && typeof data.attachment.data === "string") {
-        const { data: fileData, name, mime } = data.attachment;
-        const allowedMime = typeof mime === "string" && /^(image|video)\/[a-zA-Z0-9.+-]+$/.test(mime);
-        const encodedLimit = 11_200_000;
-        const prefix = `data:${mime};base64,`;
-        const base64 = fileData.startsWith(prefix) ? fileData.slice(prefix.length) : "";
-        const validBase64 = base64.length > 0 &&
-          /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64);
-        if (!allowedMime || fileData.length > encodedLimit || !validBase64 ||
-            Buffer.from(base64, "base64").length > 8 * 1024 * 1024) {
-          socket.send(JSON.stringify({ type: "error", message: "画像・動画は8MB以下の対応形式を選択してください。" }));
+      if (!client.joined) {
+        sendError(socket, "先にチャットへ参加してください。");
+        return;
+      }
+
+      if (data.type === "lock-toggle") {
+        lockOwnerId = lockOwnerId === null ? client.id : null;
+        broadcast({ type: "lock", lockedBy: lockOwnerId });
+        return;
+      }
+
+      if (data.type === "admin-enable") {
+        if (data.code !== "888") {
+          sendError(socket, "管理者コマンドが無効です。");
           return;
         }
-        attachment = {
-          data: fileData,
-          name: typeof name === "string" ? name.slice(0, 255) : "ファイル",
-          mime,
-        };
-      }
-      if (!text && !attachment) {
-        socket.send(JSON.stringify({ type: "error", message: "メッセージか画像・動画を入力してください。" }));
+        const session = sessions.get(client.resumeToken);
+        if (!session) {
+          sendError(socket, "管理者セッションがありません。");
+          return;
+        }
+        client.isAdmin = true;
+        session.isAdmin = true;
+        socket.send(JSON.stringify({ type: "admin-enabled" }));
         return;
       }
 
-      const replyTo = messages.find((message) => message.id === data.replyTo);
-      const message = {
-        id: randomUUID(),
-        authorId: client.id,
-        name: client.name,
-        color: client.color,
-        text,
-        attachment,
-        replyTo: replyTo ? {
-          id: replyTo.id,
-          authorId: replyTo.authorId,
-          name: replyTo.name,
-          text: replyTo.text || replyTo.attachment?.name || "",
-        } : null,
-      };
-      messages.push(message);
-      broadcast({ type: "message", message });
-      return;
-    }
-
-    if (data.type === "delete") {
-      const index = messages.findIndex((message) =>
-        message.id === data.id && (message.authorId === client.id || client.isAdmin)
-      );
-      if (index !== -1) {
-        messages.splice(index, 1);
-        broadcast({ type: "delete", id: data.id });
+      if (data.type === "color") {
+        if (!colors.has(data.color)) {
+          sendError(socket, "色を選択してください。");
+          return;
+        }
+        await recolorMessages(client.id, data.color);
+        client.color = data.color;
+        broadcast({ type: "color", authorId: client.id, color: client.color });
+        return;
       }
-      return;
-    }
 
-    if (data.type === "signal" && typeof data.to === "string") {
-      const recipient = [...clients].find(([, peer]) => peer.joined && peer.id === data.to)?.[0];
-      if (recipient?.readyState === WebSocket.OPEN) {
-        recipient.send(JSON.stringify({ type: "signal", from: client.id, signal: data.signal }));
+      if (data.type === "rename") {
+        const name = typeof data.name === "string" ? data.name.trim().slice(0, 24) : "";
+        if (!name) {
+          sendError(socket, "ユーザー名を入力してください。");
+          return;
+        }
+        await renameMessages(client.id, name);
+        client.name = name;
+        broadcast({ type: "name", authorId: client.id, name });
+        return;
       }
+
+      if (data.type === "message") {
+        const message = await createMessage(data, client);
+        broadcast({ type: "message", message });
+        return;
+      }
+
+      if (data.type === "delete") {
+        if (typeof data.id === "string" && await deleteMessage(data.id, client)) {
+          broadcast({ type: "delete", id: data.id });
+        }
+        return;
+      }
+
+      if (data.type === "signal" && typeof data.to === "string") {
+        const recipient = [...clients].find(([, peer]) => peer.joined && peer.id === data.to)?.[0];
+        if (recipient?.readyState === WebSocket.OPEN) {
+          recipient.send(JSON.stringify({ type: "signal", from: client.id, signal: data.signal }));
+        }
+      }
+    } catch (error) {
+      console.error(`WebSocket ${data.type || "unknown"} request failed:`, error);
+      sendError(socket, error.message || "処理に失敗しました。");
     }
-  });
+  }
 
   socket.on("close", () => {
     clients.delete(socket);
@@ -234,6 +458,11 @@ wss.on("connection", (socket) => {
     }
   });
 });
+
+void deleteExpiredMessages();
+void keepAppwriteAlive();
+setInterval(deleteExpiredMessages, 60 * 60 * 1000);
+setInterval(keepAppwriteAlive, 24 * 60 * 60 * 1000);
 
 const port = Number(process.env.PORT) || 3000;
 server.listen(port, "0.0.0.0", () => console.log(`Chat is running at http://localhost:${port}`));
