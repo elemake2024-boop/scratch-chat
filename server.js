@@ -35,6 +35,7 @@ const colors = new Set(["red", "blue", "yellow", "green", "white"]);
 const clients = new Map();
 const sessions = new Map();
 let lockOwnerId = null;
+let maintenanceMode = false;
 let pinnedMessageId = null;
 const retentionMs = 72 * 60 * 60 * 1000;
 const pageSize = 100;
@@ -371,6 +372,7 @@ wss.on("connection", (socket) => {
           messages,
           pinnedMessageId,
           lockedBy: lockOwnerId,
+          maintenanceMode,
           peers: [...clients.values()].filter((peer) => peer.joined && peer !== client).map(({ id }) => id),
           appwrite: {
             endpoint: appwriteConfig.endpoint,
@@ -388,6 +390,10 @@ wss.on("connection", (socket) => {
       }
 
       if (data.type === "lock-toggle") {
+        if (!client.isAdmin) {
+          sendError(socket, "ロックモードは管理者メニューから操作してください。");
+          return;
+        }
         lockOwnerId = lockOwnerId === null ? client.id : null;
         broadcast({ type: "lock", lockedBy: lockOwnerId });
         return;
@@ -406,6 +412,16 @@ wss.on("connection", (socket) => {
         client.isAdmin = true;
         session.isAdmin = true;
         socket.send(JSON.stringify({ type: "admin-enabled" }));
+        return;
+      }
+
+      if (data.type === "maintenance-toggle") {
+        if (!client.isAdmin) {
+          sendError(socket, "メンテナンスモードは管理者だけが切り替えられます。");
+          return;
+        }
+        maintenanceMode = !maintenanceMode;
+        broadcast({ type: "maintenance-mode", enabled: maintenanceMode });
         return;
       }
 

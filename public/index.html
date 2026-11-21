@@ -25,6 +25,9 @@
       <div id="lock-screen" tabindex="-1" hidden>
         <img src="/lock-screen.svg" alt="STOP! 管理者のロック解除をお待ちください。">
       </div>
+      <div id="maintenance-screen" tabindex="-1" hidden>
+        <img src="/maintenance-screen.png" alt="メンテナンス中です。チャット履歴が消去されます。再開までしばらくお待ちください。">
+      </div>
       <section id="chat">
         <div id="screens" aria-label="画面共有"></div>
         <div id="pinned-message" hidden></div>
@@ -34,6 +37,22 @@
           <div class="composer">
             <textarea id="text" maxlength="4000" placeholder="メッセージを入力"></textarea>
             <div class="actions">
+              <div id="admin-settings" class="settings-menu" hidden>
+                <button id="admin-settings-toggle" class="icon-button" type="button" aria-label="管理者メニューを開く" title="管理者メニュー" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="m19.4 15 .1.1a1.8 1.8 0 1 1-2.5 2.5l-.1-.1a1.8 1.8 0 0 0-3 .9v.2a1.8 1.8 0 1 1-3.6 0v-.2a1.8 1.8 0 0 0-3-.9l-.1.1a1.8 1.8 0 1 1-2.5-2.5l.1-.1a1.8 1.8 0 0 0-.9-3h-.2a1.8 1.8 0 1 1 0-3.6h.2a1.8 1.8 0 0 0 .9-3l-.1-.1a1.8 1.8 0 1 1 2.5-2.5l.1.1a1.8 1.8 0 0 0 3-.9v-.2a1.8 1.8 0 1 1 3.6 0v.2a1.8 1.8 0 0 0 3 .9l.1-.1a1.8 1.8 0 1 1 2.5 2.5l-.1.1a1.8 1.8 0 0 0 .9 3h.2a1.8 1.8 0 1 1 0 3.6h-.2a1.8 1.8 0 0 0-.9 3Z" /></svg>
+                </button>
+                <div id="admin-settings-menu" class="attachment-menu-items" hidden>
+                  <div class="admin-menu-title">管理者メニュー</div>
+                  <button id="admin-lock-toggle" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
+                    <span>ロックモードを開始</span>
+                  </button>
+                  <button id="admin-maintenance-toggle" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6 18 2l4 4-4 4M13 7 3 17a2.8 2.8 0 0 0 4 4L17 11" /><path d="m5 5 4 4" /></svg>
+                    <span>メンテナンスモードを開始</span>
+                  </button>
+                </div>
+              </div>
               <div class="attachment-menu">
                 <button id="attachment-menu-toggle" class="icon-button" type="button" aria-label="添付メニューを開く" title="添付メニューを開く" aria-expanded="false">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-7-7h14" /></svg>

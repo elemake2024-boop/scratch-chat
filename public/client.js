@@ -7,6 +7,11 @@ const replyPreview = document.querySelector("#reply-preview");
 const attachmentMenu = document.querySelector("#attachment-menu");
 const attachmentMenuToggle = document.querySelector("#attachment-menu-toggle");
 const pinNextButton = document.querySelector("#pin-next");
+const adminSettings = document.querySelector("#admin-settings");
+const adminSettingsToggle = document.querySelector("#admin-settings-toggle");
+const adminSettingsMenu = document.querySelector("#admin-settings-menu");
+const adminLockToggle = document.querySelector("#admin-lock-toggle");
+const adminMaintenanceToggle = document.querySelector("#admin-maintenance-toggle");
 const pinnedMessage = document.querySelector("#pinned-message");
 const shareButton = document.querySelector("#share");
 const colorInput = document.querySelector("#color");
@@ -33,6 +38,8 @@ let pendingUploadedFileId;
 let pinNextArmed = false;
 let pinRequestPending = false;
 let pinnedMessageId = null;
+let lockModeActive = false;
+let maintenanceModeActive = false;
 let currentName = anonymousName;
 let joiningName = anonymousName;
 let replyToId = null;
@@ -118,6 +125,7 @@ async function handleSocketMessage({ data }) {
     pinNextArmed = false;
     pinRequestPending = false;
     pinNextButton.hidden = !isAdmin;
+    adminSettings.hidden = !isAdmin;
     updatePinNextButton();
     appwriteConfig = packet.appwrite;
     resumeToken = packet.resumeToken;
@@ -125,6 +133,7 @@ async function handleSocketMessage({ data }) {
     joined = true;
     setConnectionStatus("connected");
     updateLock(packet.lockedBy);
+    updateMaintenanceMode(packet.maintenanceMode);
     packet.messages.forEach(renderMessage);
     pinnedMessageId = packet.pinnedMessageId || null;
     updatePinnedMessage();
@@ -167,6 +176,8 @@ async function handleSocketMessage({ data }) {
   } else if (packet.type === "admin-enabled") {
     isAdmin = true;
     pinNextButton.hidden = false;
+    adminSettings.hidden = false;
+    updateMaintenanceMode(maintenanceModeActive);
     updateDeleteButtons();
   } else if (packet.type === "pin-next-state") {
     pinRequestPending = false;
@@ -182,6 +193,8 @@ async function handleSocketMessage({ data }) {
     closePeer(packet.id);
   } else if (packet.type === "lock") {
     updateLock(packet.lockedBy);
+  } else if (packet.type === "maintenance-mode") {
+    updateMaintenanceMode(packet.enabled);
   } else if (packet.type === "signal") {
     try {
       await receiveSignal(packet.from, packet.signal);
@@ -222,22 +235,32 @@ document.addEventListener("keydown", (event) => {
     keySequence = "";
     return;
   }
-  keySequence = `${keySequence}${event.key}`.slice(-4);
-  if (keySequence === "6780") {
-    send({ type: "lock-toggle" });
-    keySequence = "";
-  } else if (keySequence === "888") {
+  keySequence = `${keySequence}${event.key}`.slice(-3);
+  if (keySequence === "888") {
     send({ type: "admin-enable", code: "888" });
     keySequence = "";
   }
 });
 
+function updateMaintenanceMode(enabled) {
+  maintenanceModeActive = enabled === true;
+  document.querySelector("#maintenance-screen").hidden = !maintenanceModeActive || isAdmin;
+  adminMaintenanceToggle.querySelector("span").textContent = maintenanceModeActive
+    ? "メンテナンスモードを終了"
+    : "メンテナンスモードを開始";
+  if (maintenanceModeActive && !isAdmin) document.querySelector("#maintenance-screen").focus();
+}
+
 function updateLock(lockedBy) {
+  lockModeActive = Boolean(lockedBy);
   const isLocked = Boolean(lockedBy);
   const isOwner = lockedBy === myId;
   const lockScreen = document.querySelector("#lock-screen");
   lockScreen.hidden = !isLocked || isOwner;
   document.querySelector("#lock-indicator").hidden = !isOwner;
+  adminLockToggle.querySelector("span").textContent = lockModeActive
+    ? "ロックモードを終了"
+    : "ロックモードを開始";
   if (!lockScreen.hidden) lockScreen.focus();
 }
 
@@ -358,7 +381,30 @@ function closeAttachmentMenu() {
   attachmentMenuToggle.setAttribute("aria-expanded", "false");
 }
 
+function closeAdminSettingsMenu() {
+  adminSettingsMenu.hidden = true;
+  adminSettingsToggle.setAttribute("aria-expanded", "false");
+}
+
+adminSettingsToggle.addEventListener("click", () => {
+  if (!isAdmin) return;
+  closeAttachmentMenu();
+  adminSettingsMenu.hidden = !adminSettingsMenu.hidden;
+  adminSettingsToggle.setAttribute("aria-expanded", String(!adminSettingsMenu.hidden));
+});
+
+adminLockToggle.addEventListener("click", () => {
+  if (isAdmin) send({ type: "lock-toggle" });
+  closeAdminSettingsMenu();
+});
+
+adminMaintenanceToggle.addEventListener("click", () => {
+  if (isAdmin) send({ type: "maintenance-toggle" });
+  closeAdminSettingsMenu();
+});
+
 attachmentMenuToggle.addEventListener("click", () => {
+  closeAdminSettingsMenu();
   attachmentMenu.hidden = !attachmentMenu.hidden;
   attachmentMenuToggle.setAttribute("aria-expanded", String(!attachmentMenu.hidden));
 });
@@ -375,10 +421,15 @@ pinNextButton.addEventListener("click", () => {
 });
 
 document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
   if (!event.target.closest(".attachment-menu")) closeAttachmentMenu();
+  if (!event.target.closest(".settings-menu")) closeAdminSettingsMenu();
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeAttachmentMenu();
+  if (event.key === "Escape") {
+    closeAttachmentMenu();
+    closeAdminSettingsMenu();
+  }
 });
 
 fileInput.addEventListener("change", () => {

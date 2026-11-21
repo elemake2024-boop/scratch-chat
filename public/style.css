@@ -94,6 +94,27 @@ header {
   max-height: calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   object-fit: contain;
 }
+#maintenance-screen {
+  position: fixed;
+  z-index: 3;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding:
+    max(12px, env(safe-area-inset-top))
+    max(12px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-left));
+  outline: none;
+  background: #fff;
+}
+#maintenance-screen[hidden] { display: none; }
+#maintenance-screen img {
+  display: block;
+  width: min(100%, 1077px);
+  max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  object-fit: contain;
+}
 
 #chat {
   display: flex;
@@ -223,7 +244,8 @@ textarea {
   outline: 0;
 }
 .actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
-.attachment-menu { position: relative; }
+.attachment-menu, .settings-menu { position: relative; }
+.settings-menu[hidden] { display: none; }
 .attachment-menu-items {
   position: absolute;
   z-index: 3;
@@ -240,6 +262,11 @@ textarea {
 }
 .attachment-menu-items[hidden] { display: none; }
 .attachment-menu-items [hidden] { display: none; }
+.admin-menu-title {
+  padding: 6px 10px 4px;
+  color: #999;
+  font-size: 12px;
+}
 .attachment-menu-items button, .attachment-option {
   display: flex;
   align-items: center;
