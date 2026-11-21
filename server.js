@@ -35,6 +35,7 @@ const colors = new Set(["red", "blue", "yellow", "green", "white"]);
 const clients = new Map();
 const sessions = new Map();
 let lockOwnerId = null;
+let pinnedMessageId = null;
 const retentionMs = 72 * 60 * 60 * 1000;
 const pageSize = 100;
 const mimeTypes = {
@@ -180,6 +181,10 @@ async function deleteExpiredMessages() {
         tableId: appwriteConfig.tableId,
         rowId: row.$id,
       });
+      if (pinnedMessageId === row.$id) {
+        pinnedMessageId = null;
+        broadcast({ type: "pinned-message", id: null });
+      }
     }
   } catch (error) {
     console.error("Expired-message cleanup failed:", error);
@@ -364,6 +369,7 @@ wss.on("connection", (socket) => {
           resumeToken: client.resumeToken,
           isAdmin: client.isAdmin,
           messages,
+          pinnedMessageId,
           lockedBy: lockOwnerId,
           peers: [...clients.values()].filter((peer) => peer.joined && peer !== client).map(({ id }) => id),
           appwrite: {
@@ -403,6 +409,16 @@ wss.on("connection", (socket) => {
         return;
       }
 
+      if (data.type === "pin-next") {
+        if (!client.isAdmin) {
+          sendError(socket, "ピン留めは888で管理者になった人だけ使用できます。");
+          return;
+        }
+        client.pinNextMessage = data.enabled === true;
+        socket.send(JSON.stringify({ type: "pin-next-state", enabled: client.pinNextMessage }));
+        return;
+      }
+
       if (data.type === "color") {
         if (!colors.has(data.color)) {
           sendError(socket, "色を選択してください。");
@@ -428,13 +444,23 @@ wss.on("connection", (socket) => {
 
       if (data.type === "message") {
         const message = await createMessage(data, client);
+        if (client.pinNextMessage) {
+          client.pinNextMessage = false;
+          pinnedMessageId = message.id;
+          message.isPinned = true;
+        }
         broadcast({ type: "message", message });
+        if (message.isPinned) broadcast({ type: "pinned-message", id: pinnedMessageId });
         return;
       }
 
       if (data.type === "delete") {
         if (typeof data.id === "string" && await deleteMessage(data.id, client)) {
           broadcast({ type: "delete", id: data.id });
+          if (pinnedMessageId === data.id) {
+            pinnedMessageId = null;
+            broadcast({ type: "pinned-message", id: null });
+          }
         }
         return;
       }

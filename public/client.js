@@ -4,12 +4,19 @@ const textInput = document.querySelector("#text");
 const fileInput = document.querySelector("#file");
 const fileName = document.querySelector("#file-name");
 const replyPreview = document.querySelector("#reply-preview");
+const attachmentMenu = document.querySelector("#attachment-menu");
+const attachmentMenuToggle = document.querySelector("#attachment-menu-toggle");
+const pinNextButton = document.querySelector("#pin-next");
+const pinnedMessage = document.querySelector("#pinned-message");
 const shareButton = document.querySelector("#share");
 const colorInput = document.querySelector("#color");
 const displayName = document.querySelector("#display-name");
 
-const nameParts = ["あお", "ゆき", "はる", "そら", "もも", "りん"];
-const anonymousName = `匿名${nameParts[Math.floor(Math.random() * nameParts.length)]}#${Math.floor(1000 + Math.random() * 9000)}`;
+const nameParts = ["あお", "ゆき", "はる", "そら", "もも", "野獣先輩"];
+const displayNameStorageKey = "chat-display-name";
+const generatedName = `匿名${nameParts[Math.floor(Math.random() * nameParts.length)]}#${Math.floor(1000 + Math.random() * 9000)}`;
+const anonymousName = localStorage.getItem(displayNameStorageKey)?.trim().slice(0, 24) || generatedName;
+localStorage.setItem(displayNameStorageKey, anonymousName);
 displayName.value = anonymousName;
 
 let myId;
@@ -23,6 +30,9 @@ let appwriteConfig;
 let appwriteSessionPromise;
 let appwriteUserId;
 let pendingUploadedFileId;
+let pinNextArmed = false;
+let pinRequestPending = false;
+let pinnedMessageId = null;
 let currentName = anonymousName;
 let joiningName = anonymousName;
 let replyToId = null;
@@ -89,10 +99,13 @@ displayName.addEventListener("change", () => {
   if (name === currentName) return;
   if (!joined) {
     currentName = name;
+    localStorage.setItem(displayNameStorageKey, name);
     return;
   }
-  if (send({ type: "rename", name })) currentName = name;
-  else displayName.value = currentName;
+  if (send({ type: "rename", name })) {
+    currentName = name;
+    localStorage.setItem(displayNameStorageKey, name);
+  } else displayName.value = currentName;
 });
 
 async function handleSocketMessage({ data }) {
@@ -102,6 +115,10 @@ async function handleSocketMessage({ data }) {
   } else if (packet.type === "welcome") {
     myId = packet.id;
     isAdmin = packet.isAdmin === true;
+    pinNextArmed = false;
+    pinRequestPending = false;
+    pinNextButton.hidden = !isAdmin;
+    updatePinNextButton();
     appwriteConfig = packet.appwrite;
     resumeToken = packet.resumeToken;
     sessionStorage.setItem("chat-resume-token", resumeToken);
@@ -109,6 +126,8 @@ async function handleSocketMessage({ data }) {
     setConnectionStatus("connected");
     updateLock(packet.lockedBy);
     packet.messages.forEach(renderMessage);
+    pinnedMessageId = packet.pinnedMessageId || null;
+    updatePinnedMessage();
     updateDeleteButtons();
     messagesEl.scrollTop = messagesEl.scrollHeight;
     if (currentName !== joiningName) send({ type: "rename", name: currentName });
@@ -128,17 +147,33 @@ async function handleSocketMessage({ data }) {
     if (packet.authorId === myId) {
       currentName = packet.name;
       displayName.value = packet.name;
+      localStorage.setItem(displayNameStorageKey, packet.name);
     }
+    if (pinnedMessageId) updatePinnedMessage();
   } else if (packet.type === "message") {
     if (packet.message.authorId === myId && packet.message.attachment?.fileId === pendingUploadedFileId) {
       pendingUploadedFileId = null;
     }
+    if (packet.message.authorId === myId && packet.message.isPinned) {
+      pinNextArmed = false;
+      pinRequestPending = false;
+      updatePinNextButton();
+    }
     renderMessage(packet.message);
+    if (packet.message.isPinned) updatePinnedMessage(packet.message.id);
   } else if (packet.type === "delete") {
     document.querySelector(`[data-message-id="${CSS.escape(packet.id)}"]`)?.remove();
+    if (pinnedMessageId === packet.id) updatePinnedMessage(null);
   } else if (packet.type === "admin-enabled") {
     isAdmin = true;
+    pinNextButton.hidden = false;
     updateDeleteButtons();
+  } else if (packet.type === "pin-next-state") {
+    pinRequestPending = false;
+    pinNextArmed = packet.enabled === true;
+    updatePinNextButton();
+  } else if (packet.type === "pinned-message") {
+    updatePinnedMessage(packet.id);
   } else if (packet.type === "peer-joined") {
     knownPeerIds.add(packet.id);
     if (screenStream) startShare(packet.id);
@@ -154,6 +189,10 @@ async function handleSocketMessage({ data }) {
       status.textContent = "画面共有の接続に失敗しました";
     }
   } else if (packet.type === "error") {
+    if (pinRequestPending) {
+      pinRequestPending = false;
+      updatePinNextButton();
+    }
     if (pendingUploadedFileId) {
       const fileId = pendingUploadedFileId;
       pendingUploadedFileId = null;
@@ -213,6 +252,13 @@ function renderMessage(message) {
   author.className = "author";
   author.textContent = message.name;
   article.append(author);
+  if (message.isPinned) {
+    article.classList.add("pinned");
+    const badge = document.createElement("div");
+    badge.className = "pin-badge";
+    badge.textContent = "📌 ピン留め";
+    article.append(badge);
+  }
 
   const bubble = document.createElement("div");
   bubble.className = `bubble ${message.color}`;
@@ -298,9 +344,79 @@ function clearReply() {
   replyPreview.hidden = true;
 }
 
+function updatePinNextButton() {
+  pinNextButton.classList.toggle("pin-next-armed", pinNextArmed);
+  pinNextButton.setAttribute("aria-pressed", String(pinNextArmed));
+  pinNextButton.querySelector("span").textContent = pinNextArmed
+    ? "次のメッセージのピン留めを解除"
+    : "次のメッセージをピン留め";
+  pinNextButton.disabled = pinRequestPending;
+}
+
+function closeAttachmentMenu() {
+  attachmentMenu.hidden = true;
+  attachmentMenuToggle.setAttribute("aria-expanded", "false");
+}
+
+attachmentMenuToggle.addEventListener("click", () => {
+  attachmentMenu.hidden = !attachmentMenu.hidden;
+  attachmentMenuToggle.setAttribute("aria-expanded", String(!attachmentMenu.hidden));
+});
+
+pinNextButton.addEventListener("click", () => {
+  if (!isAdmin || pinRequestPending) return;
+  if (send({ type: "pin-next", enabled: !pinNextArmed })) {
+    pinRequestPending = true;
+    pinNextButton.disabled = true;
+  } else {
+    status.textContent = "接続が切れているためピン留めを設定できません";
+  }
+  closeAttachmentMenu();
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".attachment-menu")) closeAttachmentMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeAttachmentMenu();
+});
+
 fileInput.addEventListener("change", () => {
   fileName.textContent = fileInput.files[0]?.name || "";
+  closeAttachmentMenu();
 });
+fileInput.addEventListener("click", closeAttachmentMenu);
+
+function updatePinnedMessage(messageId = pinnedMessageId) {
+  pinnedMessageId = messageId;
+  messagesEl.querySelectorAll(".message.pinned").forEach((article) => {
+    article.classList.remove("pinned");
+    article.querySelector(".pin-badge")?.remove();
+  });
+  pinnedMessage.replaceChildren();
+  const article = pinnedMessageId
+    ? messagesEl.querySelector(`[data-message-id="${CSS.escape(pinnedMessageId)}"]`)
+    : null;
+  if (!article) {
+    pinnedMessage.hidden = true;
+    return;
+  }
+  article.classList.add("pinned");
+  const badge = document.createElement("div");
+  badge.className = "pin-badge";
+  badge.textContent = "📌 ピン留め";
+  article.prepend(badge);
+  const author = article.querySelector(".author")?.textContent || "";
+  const content = article.querySelector(".message-text")?.textContent ||
+    article.querySelector(".attachment")?.getAttribute("alt") || "添付ファイル";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = `📌 ${author}: ${content}`;
+  button.title = "ピン留めされたメッセージへ移動";
+  button.addEventListener("click", () => article.scrollIntoView({ behavior: "smooth", block: "center" }));
+  pinnedMessage.append(button);
+  pinnedMessage.hidden = false;
+}
 
 const maxUploadSize = 330 * 1024 * 1024;
 const uploadChunkSize = 5 * 1024 * 1024;

@@ -27,16 +27,29 @@
       </div>
       <section id="chat">
         <div id="screens" aria-label="画面共有"></div>
+        <div id="pinned-message" hidden></div>
         <div id="messages" aria-live="polite"></div>
         <div id="reply-preview" hidden></div>
         <form id="message-form">
           <div class="composer">
             <textarea id="text" maxlength="4000" placeholder="メッセージを入力"></textarea>
             <div class="actions">
-              <label class="icon-button" title="画像・動画を添付（最大330MB）" aria-label="画像・動画を添付（最大330MB）">
-                <input id="file" type="file" accept="image/*,video/*">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-7-7h14" /></svg>
-              </label>
+              <div class="attachment-menu">
+                <button id="attachment-menu-toggle" class="icon-button" type="button" aria-label="添付メニューを開く" title="添付メニューを開く" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-7-7h14" /></svg>
+                </button>
+                <div id="attachment-menu" class="attachment-menu-items" hidden>
+                  <button id="pin-next" type="button" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-4 1-3 3v5l-2 2-2-6-4-4 2-2h5l3-3zM5 19l4-4" /></svg>
+                    <span>次のメッセージをピン留め</span>
+                  </button>
+                  <label class="attachment-option" title="写真・動画を添付（最大330MB）">
+                    <input id="file" type="file" accept="image/*,video/*">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m21 15-5-5L5 20" /></svg>
+                    <span>写真・動画</span>
+                  </label>
+                </div>
+              </div>
               <button id="share" class="icon-button" type="button" title="画面共有" aria-label="画面共有">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8m-4-4v4" /></svg>
               </button>
