@@ -51,12 +51,15 @@ const pendingCandidates = new Map();
 function setConnectionStatus(state) {
   status.classList.remove("connecting", "reconnecting", "connected", "disconnected");
   status.classList.add(state);
-  status.textContent = {
+
+  const labels = {
     connecting: "接続中",
     reconnecting: "再接続中",
-    connected: "接続済み",
-    disconnected: "接続不可",
-  }[state];
+    connected: "オンライン",
+    disconnected: "オフライン",
+  };
+
+  status.textContent = labels[state];
 }
 
 function send(data) {
@@ -67,19 +70,23 @@ function send(data) {
 
 function connect() {
   if (socket && socket.readyState !== WebSocket.CLOSED) return;
+
   clearTimeout(reconnectTimer);
   socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`);
   const connection = socket;
 
   connection.addEventListener("open", () => {
     if (socket !== connection) return;
+
     reconnectDelay = 1000;
     setConnectionStatus("connecting");
     joiningName = currentName;
     send({ type: "join", name: joiningName, color: colorInput.value, resumeToken });
   });
+
   connection.addEventListener("close", () => {
     if (socket !== connection) return;
+
     joined = false;
     for (const id of peers.keys()) closePeer(id);
     knownPeerIds.clear();
@@ -89,9 +96,11 @@ function connect() {
     reconnectTimer = setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30000);
   });
+
   connection.addEventListener("error", () => {
     if (socket === connection) setConnectionStatus("disconnected");
   });
+
   connection.addEventListener("message", handleSocketMessage);
 }
 
@@ -229,22 +238,10 @@ document.addEventListener("visibilitychange", () => {
   connect();
 });
 
-let keySequence = "";
 document.addEventListener("keydown", (event) => {
-  if (event.key.length !== 1 || !/^\d$/.test(event.key)) {
-    keySequence = "";
-    return;
-  }
-  const target = event.target;
-  if (target instanceof HTMLElement &&
-      (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) {
-    keySequence = "";
-    return;
-  }
-  keySequence = `${keySequence}${event.key}`.slice(-3);
-  if (keySequence === "888") {
-    send({ type: "admin-enable", code: "888" });
-    keySequence = "";
+  if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "a") {
+    const code = window.prompt("管理者コード");
+    if (code) send({ type: "admin-enable", code });
   }
 });
 

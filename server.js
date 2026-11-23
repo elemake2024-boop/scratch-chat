@@ -1,7 +1,7 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
+const { randomUUID, timingSafeEqual } = require("node:crypto");
 const { Client, ID, Query, Storage, TablesDB } = require("node-appwrite");
 const { WebSocketServer, WebSocket } = require("ws");
 
@@ -12,6 +12,7 @@ const requiredEnv = [
   "APPWRITE_TABLE_ID",
   "APPWRITE_BUCKET_ID",
   "APPWRITE_API_KEY",
+  "ADMIN_CODE",
 ];
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
 if (missingEnv.length) throw new Error(`Missing required environment variables: ${missingEnv.join(", ")}`);
@@ -46,11 +47,38 @@ const mimeTypes = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
 };
+const adminCode = Buffer.from(process.env.ADMIN_CODE);
+const adminAttempts = new Map();
+const aiCrawlerPattern = /(?:GPTBot|ChatGPT-User|ClaudeBot|anthropic-ai|PerplexityBot|Google-Extended|CCBot|Bytespider|Meta-ExternalAgent|YouBot)/i;
+
+function setSecurityHeaders(response) {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  response.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; connect-src 'self' ws: wss: https:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+}
+
+function adminCodeMatches(code) {
+  if (typeof code !== "string") return false;
+  const supplied = Buffer.from(code);
+  return supplied.length === adminCode.length && timingSafeEqual(supplied, adminCode);
+}
 
 const server = http.createServer((request, response) => {
+  setSecurityHeaders(response);
+  const userAgent = request.headers["user-agent"] || "";
+  if (aiCrawlerPattern.test(userAgent)) {
+    response.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }).end("Forbidden");
+    return;
+  }
   const pathname = new URL(request.url, "http://localhost").pathname;
   if (request.method === "GET" && pathname === "/ping") {
     response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }).end("OK");
+    return;
+  }
+  if (request.method === "GET" && pathname === "/robots.txt") {
+    response.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }).end("User-agent: *\nDisallow: /\n");
     return;
   }
   const file = pathname === "/" ? "index.html" : path.basename(pathname);
@@ -63,6 +91,7 @@ const server = http.createServer((request, response) => {
     }
     response.writeHead(200, {
       "Content-Type": mimeTypes[path.extname(file)] || "application/octet-stream",
+      "Cache-Control": "no-store",
     });
     response.end(content);
   });
@@ -400,10 +429,20 @@ wss.on("connection", (socket) => {
       }
 
       if (data.type === "admin-enable") {
-        if (data.code !== "888") {
-          sendError(socket, "管理者コマンドが無効です。");
+        const now = Date.now();
+        const attempts = adminAttempts.get(client.id) || { count: 0, retryAt: 0 };
+        if (attempts.retryAt > now) {
+          sendError(socket, "管理者認証をしばらくお待ちください。");
           return;
         }
+        if (!adminCodeMatches(data.code)) {
+          attempts.count += 1;
+          if (attempts.count >= 5) attempts.retryAt = now + 15 * 60 * 1000;
+          adminAttempts.set(client.id, attempts);
+          sendError(socket, "管理者コードが無効です。");
+          return;
+        }
+        adminAttempts.delete(client.id);
         const session = sessions.get(client.resumeToken);
         if (!session) {
           sendError(socket, "管理者セッションがありません。");
@@ -427,7 +466,7 @@ wss.on("connection", (socket) => {
 
       if (data.type === "pin-next") {
         if (!client.isAdmin) {
-          sendError(socket, "ピン留めは888で管理者になった人だけ使用できます。");
+          sendError(socket, "ピン留めは管理者だけ使用できます。");
           return;
         }
         client.pinNextMessage = data.enabled === true;
