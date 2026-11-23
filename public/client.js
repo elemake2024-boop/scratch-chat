@@ -1,4 +1,5 @@
 const status = document.querySelector("#status");
+const participantCount = document.querySelector("#participant-count");
 const messagesEl = document.querySelector("#messages");
 const textInput = document.querySelector("#text");
 const fileInput = document.querySelector("#file");
@@ -82,6 +83,8 @@ function connect() {
     joined = false;
     for (const id of peers.keys()) closePeer(id);
     knownPeerIds.clear();
+    updateParticipantCount();
+
     setConnectionStatus("reconnecting");
     reconnectTimer = setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30000);
@@ -141,6 +144,7 @@ async function handleSocketMessage({ data }) {
     messagesEl.scrollTop = messagesEl.scrollHeight;
     if (currentName !== joiningName) send({ type: "rename", name: currentName });
     packet.peers.forEach((id) => knownPeerIds.add(id));
+    updateParticipantCount();
     if (screenStream) packet.peers.forEach(startShare);
   } else if (packet.type === "color") {
     document.querySelectorAll(`.message[data-author-id="${CSS.escape(packet.authorId)}"] .bubble`)
@@ -187,9 +191,11 @@ async function handleSocketMessage({ data }) {
     updatePinnedMessage(packet.id);
   } else if (packet.type === "peer-joined") {
     knownPeerIds.add(packet.id);
+    updateParticipantCount();
     if (screenStream) startShare(packet.id);
   } else if (packet.type === "peer-left") {
     knownPeerIds.delete(packet.id);
+    updateParticipantCount();
     closePeer(packet.id);
   } else if (packet.type === "lock") {
     updateLock(packet.lockedBy);
@@ -794,6 +800,10 @@ function sendShareToPeers() {
 }
 
 const knownPeerIds = new Set();
+function updateParticipantCount() {
+  participantCount.textContent = `参加人数: ${joined ? knownPeerIds.size + 1 : "--"}`;
+}
+
 function startShare(id) {
   knownPeerIds.add(id);
   if (!screenStream || peers.has(id)) return;
