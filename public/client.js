@@ -247,10 +247,14 @@ document.addEventListener("visibilitychange", () => {
   connect();
 });
 
+function requestAdminAccess() {
+  const code = window.prompt("管理者コード");
+  if (code) send({ type: "admin-enable", code });
+}
+
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "a") {
-    const code = window.prompt("管理者コード");
-    if (code) send({ type: "admin-enable", code });
+    requestAdminAccess();
   }
 });
 
@@ -399,7 +403,10 @@ function closeAdminSettingsMenu() {
 }
 
 adminSettingsToggle.addEventListener("click", () => {
-  if (!isAdmin) return;
+  if (!isAdmin) {
+    requestAdminAccess();
+    return;
+  }
   closeAttachmentMenu();
   adminSettingsMenu.hidden = !adminSettingsMenu.hidden;
   adminSettingsToggle.setAttribute("aria-expanded", String(!adminSettingsMenu.hidden));
