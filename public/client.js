@@ -247,14 +247,25 @@ document.addEventListener("visibilitychange", () => {
   connect();
 });
 
-function requestAdminAccess() {
-  const code = window.prompt("管理者コード");
-  if (code) send({ type: "admin-enable", code });
-}
+let keySequence = "";
 
 document.addEventListener("keydown", (event) => {
-  if (event.ctrlKey && event.altKey && event.key.toLowerCase() === "a") {
-    requestAdminAccess();
+  if (event.key.length !== 1 || !/^\d$/.test(event.key)) {
+    keySequence = "";
+    return;
+  }
+
+  const target = event.target;
+  if (target instanceof HTMLElement &&
+      (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) {
+    keySequence = "";
+    return;
+  }
+
+  keySequence = `${keySequence}${event.key}`.slice(-3);
+  if (keySequence === "888") {
+    send({ type: "admin-enable" });
+    keySequence = "";
   }
 });
 
@@ -403,10 +414,7 @@ function closeAdminSettingsMenu() {
 }
 
 adminSettingsToggle.addEventListener("click", () => {
-  if (!isAdmin) {
-    requestAdminAccess();
-    return;
-  }
+  if (!isAdmin) return;
   closeAttachmentMenu();
   adminSettingsMenu.hidden = !adminSettingsMenu.hidden;
   adminSettingsToggle.setAttribute("aria-expanded", String(!adminSettingsMenu.hidden));
