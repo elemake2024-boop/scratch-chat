@@ -4,6 +4,8 @@ const messagesEl = document.querySelector("#messages");
 const textInput = document.querySelector("#text");
 const fileInput = document.querySelector("#file");
 const fileName = document.querySelector("#file-name");
+const fileNameText = document.querySelector("#file-name-text");
+const removeFileButton = document.querySelector("#remove-file");
 const replyPreview = document.querySelector("#reply-preview");
 const attachmentMenu = document.querySelector("#attachment-menu");
 const attachmentMenuToggle = document.querySelector("#attachment-menu-toggle");
@@ -15,7 +17,7 @@ const adminLockToggle = document.querySelector("#admin-lock-toggle");
 const adminMaintenanceToggle = document.querySelector("#admin-maintenance-toggle");
 const pinnedMessage = document.querySelector("#pinned-message");
 const shareButton = document.querySelector("#share");
-const colorInput = document.querySelector("#color");
+const colorSwatches = document.querySelectorAll(".color-swatch");
 const displayName = document.querySelector("#display-name");
 
 const nameParts = ["あお", "ゆき", "はる", "そら", "もも", "野獣先輩"];
@@ -43,6 +45,7 @@ let lockModeActive = false;
 let maintenanceModeActive = false;
 let currentName = anonymousName;
 let joiningName = anonymousName;
+let selectedColor = "white";
 let replyToId = null;
 let screenStream = null;
 const peers = new Map();
@@ -81,7 +84,7 @@ function connect() {
     reconnectDelay = 1000;
     setConnectionStatus("connecting");
     joiningName = currentName;
-    send({ type: "join", name: joiningName, color: colorInput.value, resumeToken });
+    send({ type: "join", name: joiningName, color: selectedColor, resumeToken });
   });
 
   connection.addEventListener("close", () => {
@@ -104,8 +107,14 @@ function connect() {
   connection.addEventListener("message", handleSocketMessage);
 }
 
-colorInput.addEventListener("change", () => {
-  send({ type: "color", color: colorInput.value });
+colorSwatches.forEach((swatch) => {
+  swatch.addEventListener("click", () => {
+    selectedColor = swatch.dataset.color;
+    colorSwatches.forEach((option) => {
+      option.setAttribute("aria-pressed", String(option === swatch));
+    });
+    send({ type: "color", color: selectedColor });
+  });
 });
 
 displayName.addEventListener("change", () => {
@@ -158,7 +167,7 @@ async function handleSocketMessage({ data }) {
   } else if (packet.type === "color") {
     document.querySelectorAll(`.message[data-author-id="${CSS.escape(packet.authorId)}"] .bubble`)
       .forEach((bubble) => {
-        bubble.classList.remove("red", "blue", "yellow", "green", "white");
+        bubble.classList.remove("red", "blue", "yellow", "green", "black", "white");
         bubble.classList.add(packet.color);
       });
   } else if (packet.type === "name") {
@@ -436,10 +445,21 @@ document.addEventListener("keydown", (event) => {
 });
 
 fileInput.addEventListener("change", () => {
-  fileName.textContent = fileInput.files[0]?.name || "";
+  updateFilePreview(fileInput.files[0]);
   closeAttachmentMenu();
 });
 fileInput.addEventListener("click", closeAttachmentMenu);
+removeFileButton.addEventListener("click", clearSelectedFile);
+
+function updateFilePreview(file) {
+  fileNameText.textContent = file?.name || "";
+  fileName.hidden = !file;
+}
+
+function clearSelectedFile() {
+  fileInput.value = "";
+  updateFilePreview(null);
+}
 
 function updatePinnedMessage(messageId = pinnedMessageId) {
   pinnedMessageId = messageId;
@@ -759,8 +779,7 @@ document.querySelector("#message-form").addEventListener("submit", async (event)
     return;
   }
   textInput.value = "";
-  fileInput.value = "";
-  fileName.textContent = "";
+  clearSelectedFile();
   clearReply();
   status.textContent = "接続済み";
 });

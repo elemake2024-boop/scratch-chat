@@ -32,7 +32,7 @@ const tables = new TablesDB(appwriteClient);
 const storage = new Storage(appwriteClient);
 
 const publicDir = path.join(__dirname, "public");
-const colors = new Set(["red", "blue", "yellow", "green", "white"]);
+const colors = new Set(["red", "blue", "yellow", "green", "black", "white"]);
 const clients = new Map();
 const sessions = new Map();
 let lockOwnerId = null;

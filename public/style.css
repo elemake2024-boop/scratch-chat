@@ -43,13 +43,6 @@ header {
 .name-input:hover, .name-input:focus { border-bottom-color: #ddd; }
 .header-right { display: flex; align-items: center; gap: 14px; }
 .connection-info { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
-#color {
-  padding: 5px 8px;
-  border: 0;
-  border-radius: 6px;
-  color: #555;
-  background: #f7f7f7;
-}
 #status {
   display: inline-flex;
   align-items: center;
@@ -165,6 +158,48 @@ header {
   padding: 28px 4px;
   scrollbar-width: thin;
 }
+#color-picker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 680px);
+  min-height: 36px;
+  margin: 0 auto 8px;
+  padding: 0 4px;
+}
+.color-picker-label { flex: 0 0 auto; color: #888; font-size: 12px; }
+.color-swatches { display: flex; align-items: center; gap: 4px; }
+.color-swatch {
+  display: grid;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+.color-swatch::before {
+  width: 12px;
+  height: 12px;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: var(--swatch-color);
+  content: "";
+}
+.color-swatch[data-color="red"] { --swatch-color: #f04455; }
+.color-swatch[data-color="blue"] { --swatch-color: #3987f6; }
+.color-swatch[data-color="green"] { --swatch-color: #40b977; }
+.color-swatch[data-color="yellow"] { --swatch-color: #f4c433; }
+.color-swatch[data-color="black"] { --swatch-color: #252525; }
+.color-swatch[data-color="white"] { --swatch-color: #fff; }
+.color-swatch[data-color="white"]::before { border-color: #ccc; }
+.color-swatch[aria-pressed="true"]::before {
+  outline: 1px solid white;
+  box-shadow: 0 0 0 2px #888;
+}
+.color-swatch:focus-visible { outline: 2px solid #555; outline-offset: 2px; }
 .message { max-width: 82%; align-self: flex-start; }
 .message.own { align-self: flex-end; }
 .message.pinned .bubble { border-color: #e6c95f; }
@@ -181,6 +216,7 @@ header {
 .bubble.blue { border-color: #dce6fc; background: #f0f5ff; }
 .bubble.yellow { border-color: #f3ebc9; background: #fffbea; }
 .bubble.green { border-color: #dceede; background: #f1faf2; }
+.bubble.black { border-color: #333; color: white; background: #333; }
 .reply-quote {
   margin: 0 0 7px;
   padding-left: 9px;
@@ -335,7 +371,37 @@ label.icon-button input {
 }
 .send-button { color: white; background: #333; }
 .send-button:hover { background: #111; }
-#file-name { padding: 5px 10px 0; color: #888; font-size: 12px; }
+#file-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 0;
+  color: #888;
+  font-size: 12px;
+}
+#file-name[hidden] { display: none; }
+#file-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remove-file-button {
+  display: grid;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 4px;
+  border: 0;
+  border-radius: 6px;
+  color: #888;
+  background: transparent;
+}
+.remove-file-button:hover { color: #333; background: #f5f5f5; }
+.remove-file-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
 
 @media (max-width: 560px) {
   header {
